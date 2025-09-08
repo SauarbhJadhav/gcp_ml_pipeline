@@ -1,0 +1,4 @@
+pandas
+statsmodels
+google-cloud-bigquery
+db-dtypes
