@@ -1,7 +1,7 @@
 End-to-End Time Series Forecasting on Google Cloud Platform: Iowa Liquor Sales
 
 1. Overview
-Welcome! This document provides a step-by-step guide for building and orchestrating an end-to-end machine learning pipeline on the Google Cloud Platform (GCP). This project is designed as a practical demonstration for MSc-IT students to understand the key components of a modern MLOps workflow.
+Welcome! This document provides a step-by-step guide for building and orchestrating an end-to-end machine learning pipeline on the Google Cloud Platform (GCP). This project is designed as a practical demonstration to understand the key components of a modern MLOps workflow.
 
 We will build a time series forecasting model using a Holt-Winters algorithm to predict daily liquor sales. The pipeline will perform the following actions:
 
