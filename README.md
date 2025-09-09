@@ -1,321 +1,243 @@
-End-to-End Time Series Forecasting on Google Cloud Platform: Iowa Liquor Sales
+# End-to-End MLOps: Multi-Series Forecasting on GCP
 
-1. Overview
-Welcome! This document provides a step-by-step guide for building and orchestrating an end-to-end machine learning pipeline on the Google Cloud Platform (GCP). This project is designed as a practical demonstration to understand the key components of a modern MLOps workflow.
+This repository provides a comprehensive, end-to-end MLOps pipeline for performing time series forecasting on the Google Cloud Platform (GCP). It serves as a practical, step-by-step guide to modern data engineering and machine learning workflows, focusing on automating the training and deployment of multiple forecasting models—one for each unique item in a dataset—with predictions stored in BigQuery.
 
-We will build a time series forecasting model using a Holt-Winters algorithm to predict daily liquor sales. The pipeline will perform the following actions:
+---
 
-Data Ingestion: Fetch prepared data from a Google BigQuery table.
-Model Training: Train a forecasting model using a Python script.
-Containerization: Package the Python application into a Docker container.
-Registry: Store the container image in Google Artifact Registry.
-Orchestration: Automate the entire workflow using a DAG (Directed Acyclic Graph) in Google Cloud Composer (managed Apache Airflow).
-Architecture
-The high-level architecture of our pipeline can be visualized as follows:
+## Table of Contents
 
-BigQuery (Data Source) -> Cloud Composer (Orchestrator) -> Triggers a Kubernetes Pod -> Docker Container (from Artifact Registry) -> Runs Python Script (Fetches data, trains model, makes forecast) -> BigQuery (Stores Forecast)
+- [Project Overview](#project-overview)
+- [Architecture](#architecture)
+- [Prerequisites](#prerequisites)
+- [Step-by-Step Implementation](#step-by-step-implementation)
+  - [1. GCP Setup & Data Preparation](#1-gcp-setup--data-preparation)
+  - [2. Forecasting Application](#2-forecasting-application)
+  - [3. CI/CD Pipeline (GitHub Actions)](#3-cicd-pipeline-github-actions)
+  - [4. Orchestration with Cloud Composer](#4-orchestration-with-cloud-composer)
+  - [5. Running the Pipeline](#5-running-the-pipeline)
+  - [6. Troubleshooting](#6-troubleshooting)
+- [License](#license)
 
-2. Prerequisites
-Before you begin, please ensure you have the following set up:
+---
 
-Google Cloud Platform (GCP) Account: A GCP account with billing enabled. You can use the https://cloud.google.com/free for this project.
-A GCP Project: Create a new project in the GCP Console.
-Google Cloud SDK (gcloud): https://cloud.google.com/sdk/docs/install.
-Docker: [Install Docker Desktop](https://www.docker.com/products/docker-desktop/) on your local machine.
-Python 3.8+: A local Python environment.
-Basic Knowledge: A foundational understanding of SQL, Python, Docker, and command-line interfaces.
+## Project Overview
 
-3. Step-by-Step Implementation
-Step 1: Data Preparation in BigQuery
-For this demonstration, we will use the public Iowa Liquor Sales dataset. We will create a processed table that aggregates the total number of bottles sold per day for a specific store and a few specific items.
+The goal of this project is to automate the training of multiple time series forecasting models (one per item) and store their predictions in BigQuery. The pipeline leverages GitHub Actions for CI/CD and Cloud Composer (Airflow) for orchestration.
 
-Navigate to BigQuery: In the GCP Console, go to the BigQuery UI.
+**Use Case:**  
+Forecasting daily sales for multiple liquor items using the public Iowa Liquor Sales dataset.
 
-Create a Dataset: First, create a new dataset in your project called processed.
+**Key Technologies:**
+- **Data Storage & Warehousing:** Google BigQuery
+- **Modeling:** Python (pandas, statsmodels/Holt-Winters)
+- **Containerization:** Docker
+- **Artifact Management:** Google Artifact Registry
+- **CI/CD Automation:** GitHub Actions
+- **Workflow Orchestration:** Google Cloud Composer (Apache Airflow)
 
-Run the Aggregation Query: Execute the following SQL query in the BigQuery editor. This query sums the bottles sold per day for our selected items and saves the result into a new table named daily_liquor_sales_summary inside your processed dataset.
+---
 
-Note: We are aggregating the data by day to create a single time series, which is required for our forecasting model.
+## Architecture
 
--- This query creates a table with daily sales aggregated per item for a specific store.
--- This structure is ideal for multi-series forecasting.
+The pipeline follows a modern MLOps architecture, separating CI/CD from orchestration:
 
-CREATE OR REPLACE TABLE `[YOUR_PROJECT_ID].processed.daily_liquor_sales_by_item` AS (
-  SELECT
-    date AS sale_date,
-    store_number,
-    item_number,
-    -- We need to aggregate in case there are multiple sales records for the same item on the same day
-    SUM(bottles_sold) AS total_bottles_sold
-  FROM
-    `bigquery-public-data.iowa_liquor_sales.sales`
-  WHERE
-    -- Filter for a specific store
-    store_number = '10268'
-    -- Filter for a few specific, popular items to serve as our independent time series
-    AND item_number IN ('64870', '36904', '64864')
-  GROUP BY
-    sale_date, store_number, item_number
-  ORDER BY
-    store_number, item_number, sale_date
-);
+- **Code Push (GitHub) → GitHub Actions (CI/CD) → Builds & Pushes Docker Image (Artifact Registry)**
+- **Cloud Composer (Orchestration) → Triggers Daily DAG → Runs Kubernetes Pod → Pulls Image & Runs Container → Fetches Data (BigQuery) → Trains Models & Predicts → Saves Forecasts (BigQuery)**
 
-Note: Replace [YOUR_PROJECT_ID] with your actual GCP Project ID.
+---
 
-Step 2: The Forecasting Python Script
-Next, we will create a Python script that connects to BigQuery, fetches the aggregated sales data, trains a Holt-Winters model, and generates a forecast.
+## Prerequisites
 
-Create a file named forecast_model.py and add the following code.
+Before starting, ensure you have:
 
-# forecast_model.py
+- **Google Cloud Platform (GCP) Account:** [Sign up](https://cloud.google.com/free)
+- **GCP Project:** Create and note the Project ID
+- **Google Cloud SDK (gcloud):** [Install](https://cloud.google.com/sdk/docs/install)
+- **Docker:** [Install Docker Desktop](https://www.docker.com/products/docker-desktop/)
+- **Python 3.8+**
+- **GitHub Repository**
+- **GitHub Personal Access Token (PAT):** For command-line Git operations ([Guide](https://docs.github.com/en/github/authenticating-to-github/creating-a-personal-access-token))
 
-import os
-import pandas as pd
-from google.cloud import bigquery
-from statsmodels.tsa.holtwinters import ExponentialSmoothing
+---
 
-def run_forecast():
-    """
-    Main function to run the forecasting pipeline.
-    - Fetches aggregated sales data from BigQuery.
-    - Trains a Holt-Winters model.
-    - Generates a 30-day forecast.
-    - Saves the forecast back to a new BigQuery table.
-    """
-    # --- 1. Configuration ---
-    # GCP Project ID is automatically inferred from the environment
-    # where the code is running (e.g., a Cloud Composer worker).
-    project_id = os.environ.get("GCP_PROJECT")
-    source_table = f"{project_id}.processed.daily_liquor_sales_summary"
-    destination_table = f"{project_id}.processed.daily_liquor_sales_forecasts"
-    forecast_days = 30
+## Step-by-Step Implementation
 
-    print(f"Starting forecast process for project: {project_id}")
-    print(f"Source table: {source_table}")
+### 1. GCP Setup & Data Preparation
 
-    # --- 2. Fetch Data from BigQuery ---
-    bq_client = bigquery.Client()
-    sql_query = f"SELECT sale_date, total_bottles_sold FROM `{source_table}` ORDER BY sale_date"
-    
-    print("Fetching data from BigQuery...")
-    df = bq_client.query(sql_query).to_dataframe()
-    
-    # Ensure data types are correct for time series modeling
-    df['sale_date'] = pd.to_datetime(df['sale_date'])
-    df.set_index('sale_date', inplace=True)
-    
-    # The data has daily frequency. We specify this for the model.
-    df = df.asfreq('D')
-    # Fill any missing days with 0 sales
-    df['total_bottles_sold'].fillna(0, inplace=True)
-    
-    print(f"Data fetched successfully. Shape: {df.shape}")
+- **Enable Required APIs:**
+  ```sh
+  gcloud services enable bigquery.googleapis.com
+  gcloud services enable artifactregistry.googleapis.com
+  gcloud services enable composer.googleapis.com
+  gcloud services enable iamcredentials.googleapis.com
+  ```
+- **Create BigQuery Dataset:**  
+  In BigQuery UI, create a dataset named `processed`.
 
-    # --- 3. Train Holt-Winters Model ---
-    # We use an additive model for trend and seasonality, as retail sales
-    # often have weekly cycles (seasonality period of 7 days).
-    print("Training Holt-Winters Exponential Smoothing model...")
-    model = ExponentialSmoothing(
-        df['total_bottles_sold'],
-        trend='add',
-        seasonal='add',
-        seasonal_periods=7
-    ).fit()
-    print("Model training complete.")
+- **Create Processed Table:**  
+  Use the provided SQL to aggregate daily sales per item for a specific store.  
+  _Replace `[YOUR_PROJECT_ID]` with your actual GCP Project ID._
 
-    # --- 4. Generate Forecast ---
-    print(f"Generating forecast for the next {forecast_days} days...")
-    forecast = model.forecast(steps=forecast_days)
-    
-    # Format the forecast into a DataFrame for storage
-    forecast_df = pd.DataFrame({
-        'forecast_date': forecast.index,
-        'predicted_bottles_sold': forecast.values
-    })
-    # Round the predictions to the nearest integer
-    forecast_df['predicted_bottles_sold'] = forecast_df['predicted_bottles_sold'].round().astype(int)
-    
-    print("Forecast generated successfully.")
-    print(forecast_df.head())
+### 2. Forecasting Application
 
-    # --- 5. Save Forecast to BigQuery ---
-    print(f"Saving forecast to BigQuery table: {destination_table}")
-    job_config = bigquery.LoadJobConfig(
-        # Overwrite the table with new forecasts each time the pipeline runs
-        write_disposition="WRITE_TRUNCATE",
-        # Define the schema for the destination table
-        schema=[
-            bigquery.SchemaField("forecast_date", "DATE"),
-            bigquery.SchemaField("predicted_bottles_sold", "INTEGER"),
-        ],
-    )
+- **requirements.txt:**  
+  List dependencies:
+  ```
+  pandas
+  google-cloud-bigquery
+  statsmodels
+  db-dtypes
+  ```
 
-    job = bq_client.load_table_from_dataframe(
-        forecast_df, destination_table, job_config=job_config
-    )
-    job.result()  # Wait for the job to complete
+- **forecast_model.py:**  
+  Python script for multi-series forecasting using Holt-Winters, reading from and writing to BigQuery.
 
-    print(f"Forecast data successfully loaded to {destination_table}.")
+- **Dockerfile:**  
+  Containerizes the application for deployment.
 
-if __name__ == "__main__":
-    run_forecast()
-Step 3: Containerize the Application with Docker
-We need to package our Python script and its dependencies into a Docker image.
+### 3. CI/CD Pipeline (GitHub Actions)
 
-Create requirements.txt: This file lists the Python libraries our script needs.
+- **Create Artifact Registry Repository:**  
+  ```sh
+  gcloud artifacts repositories create [REPO_NAME] \
+      --repository-format=docker \
+      --location=[REGION] \
+      --description="Docker repository for forecasting model"
+  ```
+- **Create GCP Service Account:**  
+  - Grant Artifact Registry Writer role.
+  - Download JSON key.
 
-# requirements.txt
-pandas
-google-cloud-bigquery
-statsmodels
-db-dtypes
-Create Dockerfile: This file contains the instructions to build our Docker image.
+- **Configure GitHub Secrets:**  
+  - `GCP_SA_KEY`: Service account JSON
+  - `GCP_PROJECT_ID`: GCP Project ID
+  - `GCP_ARTIFACT_REGISTRY_REGION`: Artifact Registry region
+  - `GCP_ARTIFACT_REGISTRY_REPO`: Repository name
 
-# Dockerfile
+- **GitHub Actions Workflow:**  
+  Automates Docker build and push to Artifact Registry.
 
-# Use an official Python runtime as a parent image
-FROM python:3.9-slim
+### 4. Orchestration with Cloud Composer
 
-# Set the working directory in the container
-WORKDIR /app
+- **Create Cloud Composer Environment:**  
+  - Grant required roles to Composer's service account.
 
-# Copy the requirements file into the container
-COPY requirements.txt .
+- **Create DAG File:**  
+  - Use `GKEStartPodOperator` to run the forecasting container daily.
 
-# Install any needed packages specified in requirements.txt
-RUN pip install --no-cache-dir -r requirements.txt
+- **Upload DAG:**  
+  - Place `forecasting_dag.py` in Composer's DAGs folder (GCS bucket).
 
-# Copy the Python script into the container
-COPY forecast_model.py .
+### 5. Running the Pipeline
 
-# Define the command to run the application
-CMD ["python", "forecast_model.py"]
-Step 4: Push the Docker Image to Artifact Registry
-Artifact Registry is GCP's recommended service for storing and managing container images.
+- **Commit and Push Code:**  
+  ```sh
+  git add .
+  git commit -m "Initial pipeline setup"
+  git push origin main
+  ```
+- **Monitor CI/CD:**  
+  - Check GitHub Actions for successful Docker image build and push.
 
-Enable the Artifact Registry API:
+- **Trigger and Monitor Orchestration:**  
+  - Use Airflow UI to trigger and monitor DAG runs.
 
-gcloud services enable artifactregistry.googleapis.com
-Create a Docker Repository: Choose a region (e.g., us-central1) and a name for your repository.
+- **Verify Results:**  
+  - Check BigQuery for the `daily_liquor_sales_forecasts` table.
 
-gcloud artifacts repositories create [REPO_NAME] \
-    --repository-format=docker \
-    --location=[REGION] \
-    --description="Docker repository for liquor sales forecasting model"
-Replace [REPO_NAME] and [REGION].
+### 6. Troubleshooting
 
-Configure Docker Authentication: This command configures your local Docker client to authenticate with Artifact Registry.
+- **Git 403 Forbidden Error:**  
+  - Use a Personal Access Token (PAT) for GitHub authentication.
+  - Remove old credentials from your OS credential manager.
+  - [GitHub PAT Guide](https://docs.github.com/en/github/authenticating-to-github/creating-a-personal-access-token)
 
-gcloud auth configure-docker [REGION]-docker.pkg.dev
-Build and Tag the Docker Image: From your project directory (containing Dockerfile, forecast_model.py, and requirements.txt), run the build command.
+---
 
-# Define variables for convenience
-export PROJECT_ID=[YOUR_PROJECT_ID]
-export REGION=[REGION]
-export REPO_NAME=[REPO_NAME]
-export IMAGE_NAME=liquor-sales-forecaster
-export IMAGE_TAG=${REGION}-docker.pkg.dev/${PROJECT_ID}/${REPO_NAME}/${IMAGE_NAME}:latest
+## License
 
-# Build the image
-docker build -t ${IMAGE_TAG} .
-Replace the placeholders with your values.
+This project is licensed under the MIT License. See [LICENSE](LICENSE) for details.
 
-Push the Image to Artifact Registry:
+---
+          docker build . --tag "${{ env.GCP_REGION }}-docker.pkg.dev/${{ env.GCP_PROJECT_ID }}/${{ env.GCP_REPO_NAME }}/${{ env.IMAGE_NAME }}:latest"
+          docker build . --tag "${{ env.GCP_REGION }}-docker.pkg.dev/${{ env.GCP_PROJECT_ID }}/${{ env.GCP_REPO_NAME }}/${{ env.IMAGE_NAME }}:${{ github.sha }}"
 
-docker push ${IMAGE_TAG}
-You can now verify that your image is in the Artifact Registry UI in the GCP Console.
-
-Step 5: Orchestrate with Cloud Composer
-Cloud Composer is a fully managed Apache Airflow service. We will create a DAG to run our containerized job on a schedule.
+      - name: Push Docker image to Artifact Registry
+        run: |
+          docker push "${{ env.GCP_REGION }}-docker.pkg.dev/${{ env.GCP_PROJECT_ID }}/${{ env.GCP_REPO_NAME }}/${{ env.IMAGE_NAME }}:latest"
+          docker push "${{ env.GCP_REGION }}-docker.pkg.dev/${{ env.GCP_PROJECT_ID }}/${{ env.GCP_REPO_NAME }}/${{ env.IMAGE_NAME }}:${{ github.sha }}"
+Step 4: Orchestration with Cloud Composer
+Finally, we'll set up the daily job to run our container.
 
 Create a Cloud Composer Environment:
 
-Navigate to Composer in the GCP Console.
-Create a new environment (Composer 2 is recommended). This can take 20-30 minutes.
-During creation, ensure the service account used by the environment has the necessary permissions:
-BigQuery Data Editor (to read and write tables)
-Kubernetes Engine Developer or Workload Identity User (to run pods)
-Artifact Registry Reader (to pull the Docker image)
-Create the DAG File: Create a file named forecasting_dag.py. This Python script defines the Airflow workflow.
+In the GCP Console, navigate to Composer and create a new environment (Composer 2).
+During creation, edit the Service Account permissions. Grant it the following roles:
+BigQuery Data Editor
+Kubernetes Engine Developer
+Artifact Registry Reader
+Service Account User (on itself)
+Create the DAG File: Create a file named forecasting_dag.py.
 
 # forecasting_dag.py
-
 from __future__ import annotations
-
 import datetime
 from airflow.models.dag import DAG
 from airflow.providers.google.cloud.operators.kubernetes_engine import GKEStartPodOperator
 
-# --- 1. DAG Configuration ---
+# --- Replace with your specific details ---
+GCP_PROJECT_ID = "[YOUR_PROJECT_ID]"
+COMPOSER_REGION = "[COMPOSER_REGION]"
+COMPOSER_GKE_CLUSTER_NAME = "[COMPOSER_GKE_CLUSTER_NAME]"
+ARTIFACT_REGISTRY_REGION = "[ARTIFACT_REGISTRY_REGION]"
+ARTIFACT_REGISTRY_REPO = "[ARTIFACT_REGISTRY_REPO]"
+IMAGE_NAME = "liquor-sales-forecaster"
+# --- End of user-specific details ---
+
+IMAGE_PATH = f"{ARTIFACT_REGISTRY_REGION}-docker.pkg.dev/{GCP_PROJECT_ID}/{ARTIFACT_REGISTRY_REPO}/{IMAGE_NAME}:latest"
+
 with DAG(
-    dag_id="daily_liquor_sales_forecasting_pipeline",
+    dag_id="multi_item_liquor_sales_forecasting_pipeline",
     start_date=datetime.datetime(2023, 1, 1),
-    # Run the DAG daily at midnight UTC.
-    schedule_interval="0 0 * * *",
+    schedule_interval="0 0 * * *", # Daily at midnight UTC
     catchup=False,
-    tags=["forecasting", "gcp", "sales"],
-    description="A DAG to run a daily time series forecast for liquor sales.",
+    tags=["forecasting", "gcp", "sales", "multi-series"],
 ) as dag:
-    # --- 2. Task Definition ---
-    # This task will spin up a Kubernetes Pod in the Composer environment's GKE cluster
-    # and run our Docker container inside it.
     run_forecast_pod = GKEStartPodOperator(
-        task_id="run_liquor_forecast_model_pod",
-        # The name of the pod to create.
-        name="liquor-forecast-pod",
-        # The GCP project ID.
-        project_id="[YOUR_PROJECT_ID]",
-        # The location of the GKE cluster (same as your Composer environment).
-        location="[COMPOSER_REGION]",
-        # The name of the GKE cluster (find this in your Composer env details).
-        cluster_name="[COMPOSER_GKE_CLUSTER_NAME]",
-        # The namespace to run the pod in. 'default' is usually fine.
+        task_id="run_multi_series_forecast_pod",
+        name="multi-series-liquor-forecast-pod",
+        project_id=GCP_PROJECT_ID,
+        location=COMPOSER_REGION,
+        cluster_name=COMPOSER_GKE_CLUSTER_NAME,
         namespace="default",
-        # The full path to the Docker image in Artifact Registry.
-        image="[REGION]-docker.pkg.dev/[YOUR_PROJECT_ID]/[REPO_NAME]/liquor-sales-forecaster:latest",
-        # Environment variables to pass to the container.
-        # The Python script uses GCP_PROJECT to construct table names.
-        env_vars={
-            "GCP_PROJECT": "[YOUR_PROJECT_ID]"
-        },
-        # Ensure the pod is deleted after the task completes.
+        image=IMAGE_PATH,
+        env_vars={"GCP_PROJECT": GCP_PROJECT_ID},
         do_xcom_push=False,
     )
+Important: Replace all the placeholder values at the top of the DAG file. You can find the [COMPOSER_GKE_CLUSTER_NAME] on your Composer environment's details page.
 
-Important: Replace the following placeholders in the DAG file:
+Upload the DAG: On your Composer environment's page, click the "DAGs Folder" link to open a GCS bucket. Upload your forecasting_dag.py file there.
 
-[YOUR_PROJECT_ID]
-[COMPOSER_REGION] (e.g., us-central1)
-[COMPOSER_GKE_CLUSTER_NAME] (Find this in the "GKE cluster" link on your Composer environment's details page).
-The full image path from Step 4.
-Upload the DAG to Composer:
+5. Running the Pipeline
+Commit and Push: Commit all your new files (forecast_model.py, Dockerfile, .github/workflows/build-and-push.yml, etc.) and push them to the main branch of your GitHub repository.
+git add .
+git commit -m "Initial pipeline setup"
+git push origin main
+Monitor CI/CD: Go to the Actions tab in your GitHub repository. You will see the "Build and Push" workflow running. It should complete successfully, pushing your image to Artifact Registry.
+Trigger and Monitor Orchestration:
+Open the Airflow UI from your Cloud Composer environment.
+Find the multi_item_liquor_sales_forecasting_pipeline DAG.
+Un-pause it and trigger it manually using the play button.
+Monitor the run. You can view the logs from the pod to see the Python script's output.
+Verify Results: Once the DAG run is successful, go to BigQuery. A new table named daily_liquor_sales_forecasts should exist in your processed dataset. Query it to see your predictions!
+SELECT *
+FROM `[YOUR_PROJECT_ID].processed.daily_liquor_sales_forecasts`
+ORDER BY item_number, forecast_date;
+6. Troubleshooting
+Git 403 Forbidden Error when Pushing: This error means your local Git client is using outdated or incorrect credentials. GitHub requires a Personal Access Token (PAT) for command-line operations, not your password.
 
-In the GCP Console, go to your Composer environment's details page.
-Click on the "DAGs Folder" link. This will open a Google Cloud Storage (GCS) bucket.
-Upload your forecasting_dag.py file to this bucket. Airflow will automatically detect and load it within a few minutes.
-
-4. Running the Pipeline and Verifying Results
-Trigger the DAG:
-
-Open the Airflow UI from your Composer environment page.
-Find the daily_liquor_sales_forecasting_pipeline DAG in the list.
-Un-pause the DAG using the toggle on the left.
-To run it immediately, click the "Play" button on the right.
-Monitor the Run:
-
-Click on the DAG name to see the Grid View.
-You can click on the running task (run_liquor_forecast_model_pod) and view its logs to see the output from our Python script.
-Check the Results:
-
-Once the DAG run is successful, navigate back to the BigQuery UI.
-In your processed dataset, you should now see a new table named daily_liquor_sales_forecasts.
-Query this table to see the 30-day forecast generated by your model!
-SELECT * FROM `[YOUR_PROJECT_ID].processed.daily_liquor_sales_forecasts` ORDER BY forecast_date;
-
-5. Conclusion and Next Steps
-Congratulations! You have successfully built and deployed an end-to-end ML pipeline on GCP. You learned how to:
-
-Prepare data in BigQuery.
-Develop and containerize a model with Python and Docker.
-Store your container in Artifact Registry.
-Orchestrate the entire workflow with Cloud Composer and Kubernetes.
+Generate a PAT: In GitHub, go to Settings > Developer settings > Personal access tokens > Tokens (classic). Generate a new token with the repo scope. Copy the token.
+Clear Old Credentials:
+Windows: Go to Control Panel > Credential Manager > Windows Credentials and remove the entry for git:<a href="https://github.com" target="_blank">https://github.com</a>.
+macOS: Open the "Keychain Access" app, search for github.com, and delete the entry.
+Try Pushing Again: The next time you run git push, you will be prompted for your username and password. For the password, paste your new Personal Access Token
