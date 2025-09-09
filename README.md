@@ -154,31 +154,39 @@ Before starting, ensure you have:
 
 ---
 
-## License
-
-This project is licensed under the MIT License. See [LICENSE](LICENSE) for details.
 
 ---
-          docker build . --tag "${{ env.GCP_REGION }}-docker.pkg.dev/${{ env.GCP_PROJECT_ID }}/${{ env.GCP_REPO_NAME }}/${{ env.IMAGE_NAME }}:latest"
-          docker build . --tag "${{ env.GCP_REGION }}-docker.pkg.dev/${{ env.GCP_PROJECT_ID }}/${{ env.GCP_REPO_NAME }}/${{ env.IMAGE_NAME }}:${{ github.sha }}"
 
-      - name: Push Docker image to Artifact Registry
-        run: |
-          docker push "${{ env.GCP_REGION }}-docker.pkg.dev/${{ env.GCP_PROJECT_ID }}/${{ env.GCP_REPO_NAME }}/${{ env.IMAGE_NAME }}:latest"
-          docker push "${{ env.GCP_REGION }}-docker.pkg.dev/${{ env.GCP_PROJECT_ID }}/${{ env.GCP_REPO_NAME }}/${{ env.IMAGE_NAME }}:${{ github.sha }}"
-Step 4: Orchestration with Cloud Composer
+```yaml
+  # GitHub Actions workflow snippet
+  docker build . --tag "${{ env.GCP_REGION }}-docker.pkg.dev/${{ env.GCP_PROJECT_ID }}/${{ env.GCP_REPO_NAME }}/${{ env.IMAGE_NAME }}:latest"
+  docker build . --tag "${{ env.GCP_REGION }}-docker.pkg.dev/${{ env.GCP_PROJECT_ID }}/${{ env.GCP_REPO_NAME }}/${{ env.IMAGE_NAME }}:${{ github.sha }}"
+
+- name: Push Docker image to Artifact Registry
+  run: |
+    docker push "${{ env.GCP_REGION }}-docker.pkg.dev/${{ env.GCP_PROJECT_ID }}/${{ env.GCP_REPO_NAME }}/${{ env.IMAGE_NAME }}:latest"
+    docker push "${{ env.GCP_REGION }}-docker.pkg.dev/${{ env.GCP_PROJECT_ID }}/${{ env.GCP_REPO_NAME }}/${{ env.IMAGE_NAME }}:${{ github.sha }}"
+```
+
+---
+
+## Step 4: Orchestration with Cloud Composer
+
 Finally, we'll set up the daily job to run our container.
 
-Create a Cloud Composer Environment:
+**Create a Cloud Composer Environment:**
 
 In the GCP Console, navigate to Composer and create a new environment (Composer 2).
 During creation, edit the Service Account permissions. Grant it the following roles:
-BigQuery Data Editor
-Kubernetes Engine Developer
-Artifact Registry Reader
-Service Account User (on itself)
-Create the DAG File: Create a file named forecasting_dag.py.
 
+- BigQuery Data Editor
+- Kubernetes Engine Developer
+- Artifact Registry Reader
+- Service Account User (on itself)
+
+**Create the DAG File:** Create a file named `forecasting_dag.py`.
+
+```python
 # forecasting_dag.py
 from __future__ import annotations
 import datetime
@@ -214,30 +222,52 @@ with DAG(
         env_vars={"GCP_PROJECT": GCP_PROJECT_ID},
         do_xcom_push=False,
     )
-Important: Replace all the placeholder values at the top of the DAG file. You can find the [COMPOSER_GKE_CLUSTER_NAME] on your Composer environment's details page.
+```
 
-Upload the DAG: On your Composer environment's page, click the "DAGs Folder" link to open a GCS bucket. Upload your forecasting_dag.py file there.
+> **Important:** Replace all the placeholder values at the top of the DAG file. You can find the `[COMPOSER_GKE_CLUSTER_NAME]` on your Composer environment's details page.
 
-5. Running the Pipeline
-Commit and Push: Commit all your new files (forecast_model.py, Dockerfile, .github/workflows/build-and-push.yml, etc.) and push them to the main branch of your GitHub repository.
+**Upload the DAG:** On your Composer environment's page, click the "DAGs Folder" link to open a GCS bucket. Upload your `forecasting_dag.py` file there.
+
+---
+
+## 5. Running the Pipeline
+
+**Commit and Push:** Commit all your new files (`forecast_model.py`, `Dockerfile`, `.github/workflows/build-and-push.yml`, etc.) and push them to the main branch of your GitHub repository.
+
+```sh
 git add .
 git commit -m "Initial pipeline setup"
 git push origin main
-Monitor CI/CD: Go to the Actions tab in your GitHub repository. You will see the "Build and Push" workflow running. It should complete successfully, pushing your image to Artifact Registry.
-Trigger and Monitor Orchestration:
-Open the Airflow UI from your Cloud Composer environment.
-Find the multi_item_liquor_sales_forecasting_pipeline DAG.
-Un-pause it and trigger it manually using the play button.
-Monitor the run. You can view the logs from the pod to see the Python script's output.
-Verify Results: Once the DAG run is successful, go to BigQuery. A new table named daily_liquor_sales_forecasts should exist in your processed dataset. Query it to see your predictions!
+```
+
+**Monitor CI/CD:** Go to the Actions tab in your GitHub repository. You will see the "Build and Push" workflow running. It should complete successfully, pushing your image to Artifact Registry.
+
+**Trigger and Monitor Orchestration:**
+
+1. Open the Airflow UI from your Cloud Composer environment.
+2. Find the `multi_item_liquor_sales_forecasting_pipeline` DAG.
+3. Un-pause it and trigger it manually using the play button.
+4. Monitor the run. You can view the logs from the pod to see the Python script's output.
+
+**Verify Results:** Once the DAG run is successful, go to BigQuery. A new table named `daily_liquor_sales_forecasts` should exist in your processed dataset. Query it to see your predictions!
+
+```sql
 SELECT *
 FROM `[YOUR_PROJECT_ID].processed.daily_liquor_sales_forecasts`
 ORDER BY item_number, forecast_date;
-6. Troubleshooting
-Git 403 Forbidden Error when Pushing: This error means your local Git client is using outdated or incorrect credentials. GitHub requires a Personal Access Token (PAT) for command-line operations, not your password.
+```
 
-Generate a PAT: In GitHub, go to Settings > Developer settings > Personal access tokens > Tokens (classic). Generate a new token with the repo scope. Copy the token.
-Clear Old Credentials:
-Windows: Go to Control Panel > Credential Manager > Windows Credentials and remove the entry for git:<a href="https://github.com" target="_blank">https://github.com</a>.
-macOS: Open the "Keychain Access" app, search for github.com, and delete the entry.
-Try Pushing Again: The next time you run git push, you will be prompted for your username and password. For the password, paste your new Personal Access Token
+---
+
+## 6. Troubleshooting
+
+**Git 403 Forbidden Error when Pushing:** This error means your local Git client is using outdated or incorrect credentials. GitHub requires a Personal Access Token (PAT) for command-line operations, not your password.
+
+**Generate a PAT:** In GitHub, go to Settings > Developer settings > Personal access tokens > Tokens (classic). Generate a new token with the repo scope. Copy the token.
+
+**Clear Old Credentials:**
+
+- **Windows:** Go to Control Panel > Credential Manager > Windows Credentials and remove the entry for `git:https://github.com`.
+- **macOS:** Open the "Keychain Access" app, search for github.com, and delete the entry.
+
+**Try Pushing Again:** The next time you run `git push`, you will be prompted for your username and password. For the password, paste your new Personal Access Token.
